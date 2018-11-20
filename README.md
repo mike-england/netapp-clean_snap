@@ -1,4 +1,4 @@
-# netapp-snapclean
+# netapp-clean_snaps
 Have you ever had lingering snapshot taking up space because of a policy change or failed automation process?  This is a time saver script to clean up old snapshots from a volume, set of volumes, or entire vserver.
 
 ## Getting Started
