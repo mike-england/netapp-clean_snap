@@ -1,0 +1,225 @@
+#!/bin/bash
+
+# This just sets the log location to wherever the script it located, feel free to hard code it to a specific path
+LOG_PATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+######
+### function log
+### provide a standard format for all messages to the user
+######
+function log() {
+	LOG_MSG="$1"
+	TIME=`date +'%H:%M:%S %Z'`
+	if [ -z $LOG_FILE ]
+	then
+		LOG_FILE="${LOGPATH}-`date +%Y%m%d-%H%M%S`"
+	fi
+	echo -e "$TIME - $LOG_MSG"
+}
+
+######
+### function spinner
+### display a spinning icon while the PID sent to the function is still running
+######
+function spinner() {
+	local pid=$1
+	local delay=0.75
+	local spinstr='|/-\'
+	while [ "$(ps a | awk '{print $1}' | grep $pid)" ]
+	do
+		local temp=${spinstr#?}
+		printf " [%c]  " "$spinstr"
+		local spinstr=$temp${spinstr%"$temp"}
+		sleep $delay
+		printf "\b\b\b\b\b\b"
+	done
+	printf "    \b\b\b\b"
+}
+
+######
+### function find_snaps
+### finds a list of snapshots based on the specified volume and the number of days to keep
+### creates a list (DAY_SEARCH) by using `date <current date> - $DAYS_TO_KEEP days ago` in a while loop
+### e.g. we want to keep 2 days, it'll take the current date - 2, then the current date - 1 in a list
+###      then it will add the current date to the list
+### once the date list is created, query the storage array for all the snapshots and create a csv variable called SNAPLIST
+######
+function find_snaps() {
+	local VOLUME="$1"
+	
+	log "Looking for snapshots older than $DAYS_TO_KEEP days on volume $VOLUME"
+
+	# If we haven't got one, create a list of days we want to keep
+	if [[ -z $DAY_SEARCH ]]
+	then
+		while [[ $DAYS_TO_KEEP -gt 0 ]]
+		do
+			# a space is added to the beginning and end of the day to avoid matching time
+			DAY_SEARCH="!*\"`date +\"%b %d\" -d "$DAYS_TO_KEEP days ago"`\"*,$DAY_SEARCH"
+			DAYS_TO_KEEP=`expr $DAYS_TO_KEEP - 1`
+		done
+		# add todays date to the end of the list, no need for a comma as the previous put that in
+		DAY_SEARCH="${DAY_SEARCH}!*\"`date +\"%b %d\"`\"*"
+		log "Date search string is $DAY_SEARCH"
+	fi
+	# create a comma separated list
+#	RETVAL=`ssh $FILER -l $USER snap show -vserver $VSERVER -volume "$VOLUME" -create-time $DAY_SEARCH -fields create-time | grep -v "entries were" | tail -n+3 | head -n-1`
+
+	log "ssh $FILER -l $USER snap show -vserver $VSERVER -volume $VOLUME -create-time $DAY_SEARCH -fields vserver,volume,snapshot,create-time"
+	# cmode will only output number of entries if there was more than one, so grep that out if it exists, remove any empty lines, then remove the header (with tail)
+	# we're grabbing the extra fields even though we don't need them because cmode will dump them out anyway and we don't want the column to shift
+	RETVAL=`sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no $FILER -l $USER snap show -vserver $VSERVER -volume "$VOLUME" -create-time $DAY_SEARCH -fields vserver,volume,snapshot,create-time | grep -v "entries were\|^\s*$" | tail -n+3`
+#	RETVAL=`ssh $FILER -l $USER snap show -vserver $VSERVER -volume "$VOLUME" -create-time $DAY_SEARCH -fields vserver,volume,snapshot,create-time | grep -v "entries were\|^\s*$" | tail -n+3`
+	log "Snapshots matching criteria:\n$RETVAL"
+	if [ -z "$RETVAL" ]
+	then
+		echo "No snapshots found"
+	fi
+
+	# grab just the snap name column, and turn it into a csv list
+	SNAPLIST=`echo "$RETVAL" | awk '{print $3}' | tr '\n' ,`
+	# delete the trailing snapshot
+	SNAPLIST=${SNAPLIST%?}
+}
+
+######
+### function delete_snaps
+### log into the filer and delete the list of snapshots collected by find_snaps
+### this process can take a long time, so add a spinner to a background process for user feedback
+######
+function delete_snaps() {
+	local VOLUME="$1"
+	log "Asked to delete snapshots:\n$SNAPLIST"
+	if [[ -z $NO_PROGRESS ]]
+	then
+		log "Deleting snapshots on volume $VOLUME, press Control-C to abort"
+		for i in 5 4 3 2 1
+		do
+			echo -ne "$i."
+			sleep 1
+		done
+		echo ""
+		# output data to a temporary file so we can retrieve it for output later
+		sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no $FILER -l $USER snap delete -vserver $VSERVER -volume $VOLUME -snapshot $SNAPLIST > return.tmp &
+		#ssh $FILER -l $USER snap delete -vserver $VSERVER -volume $VOLUME -snapshot $SNAPLIST > return.tmp &
+		# spin against the last PID
+		spinner $!
+		log "return from ssh is:\n`cat return.tmp`"
+		rm return.tmp
+	else
+		RETVAL=`sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no $FILER -l $USER snap delete -vserver $VSERVER -volume $VOLUME -snapshot $SNAPLIST`
+		#RETVAL=`ssh $FILER -l $USER snap delete -vserver $VSERVER -volume $VOLUME -snapshot $SNAPLIST`
+		log "return from ssh is:\n`echo $RETVAL`"
+	fi
+}
+
+######
+### function usage
+### display instructions for the use of the script
+######
+function usage() {
+	echo "`basename $0` -u [user_name] -c [cluster] -vs [vserver] -v [volume] -d [days_to_keep] [-r] [-np]"
+	echo -e "\t-u is the username to log into the storage array with, e.g. domain\\\\\\mengland"
+	echo -e "\t-c is the cluster mode system to attach to, e.g. my-cluster.domain.com"
+	echo -e "\t-vs is the vserver hosting the volume, e.g. vserver1"
+	echo -e "\t-v the volume you want snaps to be deleted from.  This can include * for group matches as long as it's escaped from the command line"
+	echo -e "\t\tE.g. vol_mike\* for anything starting with vol_mike, or \* for everything on the vserver"
+	echo -e "\t-d the number of days to keep snaps, all others will be deleted."
+	echo -e "\t\tE.g. -d 2 will keep today - 2 days.  If today were the 10th, it would keep the 8th, 9th, and 10th deleting everything prior."
+	echo -e "\t-r indicates a report only, don't actually delete anything"
+	echo -e "\t-np will suppress any progress messages"
+	exit 0
+}
+
+######
+### function find_volume
+### collects a volume list based on the search criteria passed as an argument
+### this can be a specific name, or have an * present
+######
+function find_volume() {
+	local VOLUME="$1"
+	log "ssh $FILER -l $USER volume show -vserver $VSERVER -volume \"$VOLUME\" -fields vserver,volume "
+	#RETVAL=`ssh $FILER -l $USER volume show -vserver $VSERVER -volume "$VOLUME" -fields vserver,volume | grep -v "entries were" | tail -n+3 | head -n-1`
+	RETVAL=`sshpass -p "$PASSWORD" ssh -o StrictHostKeyChecking=no $FILER -l $USER volume show -vserver $VSERVER -volume "$VOLUME" -fields vserver,volume | grep -v "entries were" | tail -n+3 | head -n-1`
+	# grab the second column and replace any newlines with spaces so we can loop over the list
+	VOLUME_LIST=`echo "$RETVAL" | awk '{print $2}' | tr '\n' " "`
+	if [[ "$VOLUME_LIST" =~ ^\ +$ ]]
+	then
+		log "No volumes match search criteria"
+	else
+		log "Matching volume list is $VOLUME_LIST"
+	fi
+}
+
+# parse command line options
+if [ $# == 0 ]
+then
+        usage
+fi
+
+until [ -z "$1" ]
+do
+        case "$1" in
+        -c)
+                shift
+                FILER="$1"
+                ;;
+        -vs)
+                shift
+                VSERVER="$1"
+                ;;
+        -v)
+                shift
+                SEARCH_VOLUME="$1"
+                ;;
+        -d)
+                shift
+                DAYS_TO_KEEP="$1"
+                ;;
+	-r)
+		log "Reporting Only"
+		REPORT=1
+		;;
+	-np)
+		NO_PROGRESS=1
+		;;
+	-u)
+		shift
+		USER="$1"
+		;;
+        *)
+		echo "unknown option $1"
+                usage
+                ;;
+        esac
+        shift
+done
+
+# check all inputs
+if [[ -z $FILER ]] || [[ -z $SEARCH_VOLUME ]] || [[ -z $DAYS_TO_KEEP ]] || [[ -z $VSERVER ]] || [[ -z $USER ]]
+then
+        echo "Missing manatory input variable"
+        usage
+fi
+
+
+# main program
+echo -n Password for user "$USER":
+read -s PASSWORD
+echo
+find_volume "$SEARCH_VOLUME"
+for VOL in $VOLUME_LIST
+do
+	log "------ Clean Snap \"$VOL\" ------"
+	SNAPLIST=""
+	find_snaps "$VOL"
+	if [[ -z $SNAPLIST ]]
+	then
+		log "no snaps found for volume "$VOL", skipping"
+		continue
+	fi
+	if [ -z $REPORT ]
+	then
+		delete_snaps $VOL
+	fi
+done
