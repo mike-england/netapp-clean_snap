@@ -28,7 +28,7 @@ $ ./clean_snaps -u ad\\mengland -c labcluster1.mydomain.com -vs lab-vserver1 -v 
 10:57:54 PST - Reporting Only
 Password for user ad\mengland:
 10:58:14 PST - ------ Clean Snap "esx_volume_ds01" ------
-10:58:14 PST - Looking for snapshots older than 0 days on volume esx_cluster3_ata_ds01
+10:58:14 PST - Looking for snapshots older than 0 days on volume esx_volume_ds01
 10:58:14 PST - ssh labcluster1.mydomain.com -l ad\mengland snap show -vserver lab-vserver1 -volume esx_volume_ds01 -create-time !*"Nov 19"*,!*"Nov 18"*,!*"Nov 17"*,!*"Nov 16"*,!*"Nov 15"*,!*"Nov 14"*,!*"Nov 13"*,!*"Nov 12"*,!*"Nov 11"*,!*"Nov 10"*,!*"Nov 09"*,!*"Nov 08"*,!*"Nov 07"*,!*"Nov 06"*,!*"Nov 20"* -fields vserver,volume,snapshot,create-time
 10:58:15 PST - Snapshots matching criteria:
 lab-vserver1 esx_volume_ds01 hourly.2015-03-30_1805 Mon Mar 30 18:05:00 2015 
